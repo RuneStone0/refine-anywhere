@@ -4,7 +4,9 @@ Select text in **any macOS app**, press a hotkey (or right-click → Services), 
 
 Built for the Slack desktop app, which has no "rewrite my message" button, but it works anywhere text can be copied and pasted.
 
-<!-- DEMO -->
+![Demo: refining a Slack message with the Services menu and with Cmd+Shift+2](docs/demo.gif)
+
+*Left to right in time: the right-click → Services → Refine using AI route, then the `Cmd+Shift+2` hotkey. Full-quality video: [docs/demo.mp4](docs/demo.mp4).*
 
 ## The problem
 
