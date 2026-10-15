@@ -1,0 +1,18 @@
+{
+  "title": "Refine Anywhere",
+  "rules": [
+    {
+      "description": "Refine text with Claude (Cmd+Shift+2)",
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": {
+            "key_code": "2",
+            "modifiers": { "mandatory": ["command", "shift"] }
+          },
+          "to": [{ "shell_command": "~/.local/bin/refine-selection" }]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+#!/bin/bash
+# refine-selection: refines the selected text (or the whole field if nothing is selected)
+# in the frontmost app and pastes the result back. Meant to be run by a hotkey (Karabiner).
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+# Karabiner may start us at background priority, which makes the claude call several times slower.
+taskpolicy -B -p $$ >/dev/null 2>&1
+export LANG=en_US.UTF-8
+
+CONF_DIR="$HOME/.config/refine-anywhere"
+LOG="$HOME/Library/Logs/refine-anywhere.log"
+debug_on() { [ -f "$CONF_DIR/debug" ]; }
+dbg() { debug_on && echo "$(date '+%F %T') [selection] $*" >>"$LOG"; return 0; }
+notify() { osascript -e "display notification \"$1\" with title \"Refine Anywhere\"" >/dev/null 2>&1; }
+front() { osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>&1; }
+
+# Post Cmd+<key> straight to the HID event tap (needs only Accessibility, not Automation).
+keys() {
+  local code out
+  case "$1" in a) code=0 ;; c) code=8 ;; v) code=9 ;; esac
+  out=$(osascript -l JavaScript -e "
+    ObjC.import('ApplicationServices');
+    [true, false].forEach(function (down) {
+      var e = \$.CGEventCreateKeyboardEvent(null, $code, down);
+      \$.CGEventSetFlags(e, \$.kCGEventFlagMaskCommand);
+      \$.CGEventPost(\$.kCGHIDEventTap, e);
+    });" 2>&1)
+  [ -n "$out" ] && [ "$out" != "undefined" ] && dbg "keys $1: $out"
+  return 0
+}
+
+# Wait (max ~2s) for the trigger's modifier keys to be released so they don't combine with our Cmd+C/V.
+waited=0
+for _ in $(seq 40); do
+  flags=$(osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSEvent.modifierFlags' 2>/dev/null)
+  [ $(( ${flags:-0} & (1048576 | 262144 | 524288 | 131072) )) -eq 0 ] && break
+  waited=$((waited+1)); sleep 0.05
+done
+
+start_app=$(front)
+if debug_on; then
+  trusted=$(osascript -l JavaScript -e "ObjC.import('ApplicationServices'); \$.AXIsProcessTrusted()" 2>&1)
+  dbg "start: modifier_waits=$waited accessibility_trusted=$trusted frontmost=$start_app"
+fi
+
+orig=$(pbpaste)
+sentinel="__refine_sentinel_$$_$RANDOM__"
+printf '%s' "$sentinel" | pbcopy
+
+# Poll the clipboard (up to ~1s) until the copy lands.
+copy_and_wait() {
+  keys c
+  for _ in $(seq 20); do
+    sleep 0.05
+    text=$(pbpaste)
+    [ "$text" != "$sentinel" ] && return
+  done
+}
+copy_and_wait
+dbg "after Cmd+C: copied=$([ "$text" != "$sentinel" ] && echo yes || echo no) len=${#text}"
+if [ "$text" = "$sentinel" ]; then          # nothing selected -> take the whole field
+  keys a; sleep 0.1; copy_and_wait
+  dbg "after Cmd+A,Cmd+C: copied=$([ "$text" != "$sentinel" ] && echo yes || echo no) len=${#text}"
+fi
+
+if [ "$text" = "$sentinel" ] || [ -z "${text//[[:space:]]/}" ]; then
+  printf '%s' "$orig" | pbcopy
+  notify "Nothing to refine."
+  exit 0
+fi
+
+notify "Refining…"
+refined=$(printf '%s' "$text" | refine-text)
+
+now_app=$(front)
+dbg "refined: changed=$([ "$refined" != "$text" ] && echo yes || echo no) start_app=$start_app now_app=$now_app"
+if [ "$refined" = "$text" ]; then
+  printf '%s' "$orig" | pbcopy
+  notify "No changes suggested."
+elif [ "$now_app" != "$start_app" ]; then
+  printf '%s' "$refined" | pbcopy        # leave the result on the clipboard instead of pasting into the wrong app
+  notify "Switched apps while refining. Refined text is on your clipboard."
+else
+  printf '%s' "$refined" | pbcopy; sleep 0.15
+  keys v; sleep 0.6
+  dbg "pasted"
+  printf '%s' "$orig" | pbcopy
+fi
