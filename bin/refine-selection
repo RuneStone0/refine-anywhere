@@ -1,87 +1,152 @@
 #!/bin/bash
 # refine-selection: refines the selected text (or the whole field if nothing is selected)
 # in the frontmost app and pastes the result back. Meant to be run by a hotkey (Karabiner).
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-# Karabiner may start us at background priority, which makes the claude call several times slower.
-taskpolicy -B -p $$ >/dev/null 2>&1
-export LANG=en_US.UTF-8
+#
+# Rich text: Slack's formatted copies (bold, links, mentions, lists...) are refined run by run so formatting
+# survives; other apps' HTML is refined and pasted back as HTML. If anything looks off it falls back to plain text.
+. "$HOME/.local/share/refine-anywhere/common.sh"
+TAG=selection
+flag debug && t_start=$(perl -MTime::HiRes=time -e 'printf "%.3f", time' 2>/dev/null)
+elapsed() { flag debug && perl -MTime::HiRes=time -e "printf '%.2fs', time - ${t_start:-0}" 2>/dev/null; }
+trap 'hud_stop' EXIT
 
-CONF_DIR="$HOME/.config/refine-anywhere"
-LOG="$HOME/Library/Logs/refine-anywhere.log"
-debug_on() { [ -f "$CONF_DIR/debug" ]; }
-dbg() { debug_on && echo "$(date '+%F %T') [selection] $*" >>"$LOG"; return 0; }
-notify() { osascript -e "display notification \"$1\" with title \"Refine Anywhere\"" >/dev/null 2>&1; }
-front() { osascript -e 'tell application "System Events" to name of first process whose frontmost is true' 2>&1; }
-
-# Post Cmd+<key> straight to the HID event tap (needs only Accessibility, not Automation).
-keys() {
-  local code out
-  case "$1" in a) code=0 ;; c) code=8 ;; v) code=9 ;; esac
-  out=$(osascript -l JavaScript -e "
-    ObjC.import('ApplicationServices');
-    [true, false].forEach(function (down) {
-      var e = \$.CGEventCreateKeyboardEvent(null, $code, down);
-      \$.CGEventSetFlags(e, \$.kCGEventFlagMaskCommand);
-      \$.CGEventPost(\$.kCGHIDEventTap, e);
-    });" 2>&1)
-  [ -n "$out" ] && [ "$out" != "undefined" ] && dbg "keys $1: $out"
-  return 0
+# All the fast native bits live in refine-clip (osascript costs 0.2-0.4s per call; refine-clip ~10ms).
+keys() { refine-clip key "$1" 2>/dev/null; return 0; }
+front() { refine-clip front 2>/dev/null; }
+html_to_plain() {
+  perl -0777 -pe 's/<br\s*\/?>/\n/gi; s/<\/(p|div|li|h[1-6]|blockquote|pre)>/\n/gi; s/<[^>]*>//g;
+                   s/&nbsp;/ /g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#0?39;/'"'"'/g; s/&amp;/&/g; s/\n+\z//'
 }
+# Only bother with the HTML path when there is real formatting; plain text is safer and just as good.
+has_formatting() { grep -qiE '<(b|strong|i|em|u|s|strike|del|a|code|pre|ul|ol|li|blockquote|h[1-6])[ >]'; }
 
 # Wait (max ~2s) for the trigger's modifier keys to be released so they don't combine with our Cmd+C/V.
-waited=0
-for _ in $(seq 40); do
-  flags=$(osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSEvent.modifierFlags' 2>/dev/null)
-  [ $(( ${flags:-0} & (1048576 | 262144 | 524288 | 131072) )) -eq 0 ] && break
-  waited=$((waited+1)); sleep 0.05
-done
+for _ in $(seq 40); do refine-clip modifiers-held 2>/dev/null || break; sleep 0.05; done
 
+# Instant feedback: the pill is up before anything else happens.
+hud_start "Refining…"; sound Tink
 start_app=$(front)
-if debug_on; then
-  trusted=$(osascript -l JavaScript -e "ObjC.import('ApplicationServices'); \$.AXIsProcessTrusted()" 2>&1)
-  dbg "start: modifier_waits=$waited accessibility_trusted=$trusted frontmost=$start_app"
-fi
+flag debug && dbg "start +$(elapsed): trusted=$(refine-clip trusted 2>/dev/null) frontmost=$start_app"
 
 orig=$(pbpaste)
-sentinel="__refine_sentinel_$$_$RANDOM__"
-printf '%s' "$sentinel" | pbcopy
 
-# Poll the clipboard (up to ~1s) until the copy lands.
-copy_and_wait() {
-  keys c
-  for _ in $(seq 20); do
-    sleep 0.05
-    text=$(pbpaste)
-    [ "$text" != "$sentinel" ] && return
-  done
+text=$(refine-clip copy 2>/dev/null) || {        # nothing selected -> take the whole field
+  keys a; sleep 0.05
+  text=$(refine-clip copy 2>/dev/null) || text=""
 }
-copy_and_wait
-dbg "after Cmd+C: copied=$([ "$text" != "$sentinel" ] && echo yes || echo no) len=${#text}"
-if [ "$text" = "$sentinel" ]; then          # nothing selected -> take the whole field
-  keys a; sleep 0.1; copy_and_wait
-  dbg "after Cmd+A,Cmd+C: copied=$([ "$text" != "$sentinel" ] && echo yes || echo no) len=${#text}"
-fi
+t_copy=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')   # after our own synthetic key presses
+cc_after=$(refine-clip changecount)
+dbg "copied +$(elapsed): len=${#text}"
 
-if [ "$text" = "$sentinel" ] || [ -z "${text//[[:space:]]/}" ]; then
-  printf '%s' "$orig" | pbcopy
-  notify "Nothing to refine."
+if [ -z "${text//[[:space:]]/}" ]; then
+  hud_stop; printf '%s' "$orig" | pbcopy
+  tell_user "Nothing to refine" 2.5; sound Basso
   exit 0
 fi
 
-notify "Refining…"
-refined=$(printf '%s' "$text" | refine-text)
-
-now_app=$(front)
-dbg "refined: changed=$([ "$refined" != "$text" ] && echo yes || echo no) start_app=$start_app now_app=$now_app"
-if [ "$refined" = "$text" ]; then
-  printf '%s' "$orig" | pbcopy
-  notify "No changes suggested."
-elif [ "$now_app" != "$start_app" ]; then
-  printf '%s' "$refined" | pbcopy        # leave the result on the clipboard instead of pasting into the wrong app
-  notify "Switched apps while refining. Refined text is on your clipboard."
+# What kind of content did the copy produce?  ops = Slack rich text, html = other rich text, plain = just text.
+kind=plain
+texty_file=$(mktemp); new_ops_file=$(mktemp)
+trap 'hud_stop; rm -f "$texty_file" "$new_ops_file"' EXIT
+if refine-clip read-texty >"$texty_file" 2>/dev/null; then
+  kind=ops
 else
-  printf '%s' "$refined" | pbcopy; sleep 0.15
-  keys v; sleep 0.6
-  dbg "pasted"
-  printf '%s' "$orig" | pbcopy
+  html=$(refine-clip read-html 2>/dev/null)
+  if [ -n "$html" ] && printf '%s' "$html" | has_formatting; then kind=html; fi
 fi
+dbg "clipboard kind=$kind +$(elapsed)"
+
+fail_refine() {
+  hud_stop; printf '%s' "$orig" | pbcopy
+  notify "Refine failed or timed out (is claude logged in? run: claude /login). Text left unchanged."
+  sound Basso; exit 0
+}
+
+refined_rich=""
+if [ $kind != plain ]; then
+  if [ $kind = ops ]; then
+    refined_rich=$(refine-text --ops <"$texty_file"); rc=$?
+  else
+    refined_rich=$(printf '%s' "$html" | refine-text --html); rc=$?
+  fi
+  if [ $rc -eq 1 ]; then fail_refine; fi                       # claude itself failed: don't retry
+  if [ $rc -ne 0 ] || [ -z "$refined_rich" ]; then
+    dbg "rich refine rejected (rc=$rc), falling back to plain"; kind=plain
+  fi
+fi
+
+if [ $kind = ops ]; then
+  printf '%s' "$refined_rich" >"$new_ops_file"
+  refined_plain=$(refine-clip plain "$new_ops_file")
+  changed=$(refine-clip same "$texty_file" "$new_ops_file" && echo no || echo yes)
+elif [ $kind = html ]; then
+  refined_plain=$(printf '%s' "$refined_rich" | html_to_plain)
+  changed=$([ "$refined_rich" != "$html" ] && echo yes || echo no)
+else
+  refined=$(printf '%s' "$text" | refine-text --strict) || fail_refine
+  changed=$([ "$refined" != "$text" ] && echo yes || echo no)
+fi
+
+hud_stop
+now_app=$(front)
+dbg "refined +$(elapsed): kind=$kind changed=$changed start_app=$start_app now_app=$now_app"
+
+if [ "$changed" = no ]; then
+  printf '%s' "$orig" | pbcopy
+  tell_user "No changes needed"; sound Pop
+  exit 0
+fi
+
+# Put the result on the clipboard, keeping formatting. Needs the clipboard to still hold the original copy.
+put_result() {
+  if [ $kind = ops ]; then
+    refine-clip write-texty "$new_ops_file" "$texty_file" || put_plain
+  elif [ $kind = html ]; then
+    local hf pf; hf=$(mktemp); pf=$(mktemp)
+    printf '%s' "$refined_rich" >"$hf"; printf '%s' "$refined_plain" >"$pf"
+    refine-clip write-html "$hf" "$pf"; rm -f "$hf" "$pf"
+  else
+    printf '%s' "$refined" | pbcopy
+  fi
+}
+# Plain text only (used when the formatted clipboard can't be trusted any more).
+put_plain() {
+  if [ $kind = plain ]; then printf '%s' "$refined" | pbcopy; else printf '%s' "$refined_plain" | pbcopy; fi
+}
+
+if [ "$now_app" != "$start_app" ]; then
+  put_result                               # never paste into the wrong app
+  tell_user "Switched apps: result is on your clipboard" 5; sound Basso
+  exit 0
+fi
+
+# Make sure nothing changed while we were refining: no typing or clicking, and (for Slack rich text, which we
+# patch in place) nobody else touched the clipboard. This avoids a second Cmd+C that could race with the paste.
+why=""
+if refine-clip typed-since "$t_copy"; then why="you typed or clicked while it was working"; fi
+if [ -z "$why" ] && [ $kind = ops ] && [ "$(refine-clip changecount)" != "$cc_after" ]; then why="the clipboard changed meanwhile"; fi
+if [ -n "$why" ]; then
+  dbg "not pasting: $why"
+  put_plain
+  tell_user "Text changed meanwhile: result is on your clipboard" 5; sound Basso
+  exit 0
+fi
+
+put_result; sleep 0.15
+if flag debug; then
+  if [ $kind = ops ]; then
+    chk=$(mktemp)
+    onclip=$(refine-clip read-texty >"$chk" 2>/dev/null && refine-clip same "$chk" "$new_ops_file" && echo yes || echo no)
+    rm -f "$chk"
+  fi
+  dbg "before paste: clipboard_plain_len=$(pbpaste | wc -c | tr -d ' ') refined_formatting_on_clipboard=${onclip:-n/a}"
+fi
+if flag no-paste; then                        # diagnostics: leave the result on the clipboard, paste it yourself
+  dbg "no-paste flag: leaving the refined result on the clipboard"
+  tell_user "Result is on the clipboard: paste with Cmd+V" 6; sound Pop
+  exit 0
+fi
+keys v; sleep 1.2          # give the app time to read the clipboard before we put the old contents back
+dbg "pasted kind=$kind +$(elapsed)"
+printf '%s' "$orig" | pbcopy
+tell_user "✓ Refined"; sound Pop

@@ -3,8 +3,19 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 
-mkdir -p "$HOME/.local/bin" "$HOME/Library/Services"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/refine-anywhere" "$HOME/Library/Services"
 install -m 755 "$here/bin/refine-text" "$here/bin/refine-selection" "$HOME/.local/bin/"
+install -m 644 "$here/lib/common.sh" "$HOME/.local/share/refine-anywhere/common.sh"
+
+# Small native helpers, required (the Xcode Command Line Tools provide swiftc):
+#   refine-hud   the floating progress pill
+#   refine-clip  fast key presses and clipboard access, plus Slack rich-text support (keeps bold, links, mentions...)
+if ! command -v swiftc >/dev/null 2>&1; then
+  echo "swiftc not found. Install the Xcode Command Line Tools first:  xcode-select --install" >&2
+  exit 1
+fi
+swiftc -O -o "$HOME/.local/bin/refine-hud" "$here/tools/refine-hud.swift"
+swiftc -O -o "$HOME/.local/bin/refine-clip" "$here/tools/refine-clip.swift"
 
 rm -rf "$HOME/Library/Services/Refine using AI.workflow"
 cp -R "$here/services/Refine using AI.workflow" "$HOME/Library/Services/"
