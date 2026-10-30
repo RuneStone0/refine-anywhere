@@ -62,7 +62,7 @@ fail_refine() {
   sound Basso; exit 0
 }
 
-refined_rich=""
+refined_rich=""; flattened=0
 if [ $kind != plain ]; then
   if [ $kind = ops ]; then
     refined_rich=$(refine-text --ops <"$texty_file"); rc=$?
@@ -71,7 +71,14 @@ if [ $kind != plain ]; then
   fi
   if [ $rc -eq 1 ]; then fail_refine; fi                       # claude itself failed: don't retry
   if [ $rc -ne 0 ] || [ -z "$refined_rich" ]; then
-    dbg "rich refine rejected (rc=$rc), falling back to plain"; kind=plain
+    dbg "rich refine rejected (rc=$rc), falling back to plain"
+    if [ $kind = ops ]; then
+      # Pasting plain text would flatten the formatting and turn mentions into plain text. Never do that silently:
+      # keep the refined text for the clipboard instead.
+      flattened=1
+      if [ $rc -eq 3 ] && [ -n "$refined_rich" ]; then refined="$refined_rich"; else refined=""; fi
+    fi
+    kind=plain
   fi
 fi
 
@@ -83,7 +90,7 @@ elif [ $kind = html ]; then
   refined_plain=$(printf '%s' "$refined_rich" | html_to_plain)
   changed=$([ "$refined_rich" != "$html" ] && echo yes || echo no)
 else
-  refined=$(printf '%s' "$text" | refine-text --strict) || fail_refine
+  [ -n "$refined" ] || refined=$(printf '%s' "$text" | refine-text --strict) || fail_refine
   changed=$([ "$refined" != "$text" ] && echo yes || echo no)
 fi
 
@@ -113,6 +120,12 @@ put_result() {
 put_plain() {
   if [ $kind = plain ]; then printf '%s' "$refined" | pbcopy; else printf '%s' "$refined_plain" | pbcopy; fi
 }
+
+if [ $flattened = 1 ]; then
+  put_plain
+  tell_user "Couldn't keep the formatting, so nothing was pasted. Refined text is on your clipboard" 6; sound Basso
+  exit 0
+fi
 
 if [ "$now_app" != "$start_app" ]; then
   put_result                               # never paste into the wrong app

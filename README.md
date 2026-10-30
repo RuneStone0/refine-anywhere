@@ -1,6 +1,6 @@
 # refine-anywhere
 
-Select text in **any macOS app**, press a hotkey (or right-click → Services), and Claude copy-edits it in place: typos, grammar, punctuation and capitalisation fixed, your wording and tone kept.
+Select text in **any macOS app**, press a hotkey (or right-click → Services), and Claude refines it in place: typos, grammar and punctuation fixed, and wordy drafts tightened into something clear and concise, with your meaning, names and voice kept. Prefer typo fixes only? Set `style` to `light` (see Configuration).
 
 Built for the Slack desktop app, which has no "rewrite my message" button. In Slack it **keeps your formatting**: bold, italic, links, lists, @mentions and smart links survive the round trip. In other apps it works on plain text.
 
@@ -28,7 +28,7 @@ Safety nets:
 - If Claude fails or times out, your original text is left untouched.
 - If you switch apps while it works, it does **not** paste into the wrong window. The result is left on the clipboard instead.
 - If you type or click while it works, it doesn't paste over what you did. Same fallback.
-- Slack mentions and smart links are never reworded, and any change that would damage the formatting is dropped.
+- Slack mentions and smart links are never reworded. If a rewrite can't be applied to the formatted message exactly, it is retried once with the lighter style; if that fails too, **nothing is pasted** and the refined text is left on your clipboard (pasting it would flatten the formatting and turn mentions into plain text).
 
 ## How it works
 
@@ -58,9 +58,9 @@ When you copy formatted text in Slack, the clipboard holds a Chromium "web custo
 1. gives the model only the plain text of the runs, which keeps it as fast and reliable as plain text;
 2. diffs the model's answer against the original word by word, and applies each change only **inside the single editable run it belongs to**;
 3. never touches runs with `slack*` attributes (mentions, smart links, emoji), URLs, or line-format runs such as bullets;
-4. verifies the result has the same runs and attributes, then rewrites the clipboard (clear, then every format back, since macOS silently ignores in-place edits to another app's clipboard) and pastes.
+4. requires the projection to reproduce the model's text exactly (an edit that crosses a mention, a bullet or two runs can't be applied faithfully, so the rewrite is rejected rather than half-applied), verifies the result has the same runs and attributes, then rewrites the clipboard (clear, then every format back, since macOS silently ignores in-place edits to another app's clipboard) and pastes.
 
-If anything doesn't check out it falls back to plain text rather than risk mangling the message. Other apps' HTML (e.g. browsers) takes a similar path with a tag-structure check; that path has had far less real-world testing than Slack's.
+If anything doesn't check out it retries with the light style and otherwise stops without pasting, rather than risk mangling the message. Other apps' HTML (e.g. browsers) takes a similar path with a tag-structure check; that path has had far less real-world testing than Slack's.
 
 ## Requirements
 
@@ -95,7 +95,7 @@ Uninstall with `./uninstall.sh`.
 
 - Select text and press `Cmd+Shift+2`. With nothing selected, the whole text field is refined.
 - Or select text, right-click, **Services → Refine using AI**.
-- It takes about 3–8 seconds depending on the model and message length. The pill shows while it works; stay in the app until it finishes.
+- It takes about 3–8 seconds depending on the model and message length (a formatted message that needs the light-style retry takes a few seconds longer). The pill shows while it works; stay in the app until it finishes.
 
 ## Configuration
 
@@ -104,13 +104,16 @@ Karabiner and Services don't pass your shell environment, so settings are files 
 | File | Effect |
 | --- | --- |
 | `model` | Model alias or id. Default: `sonnet`. `haiku` is faster but less consistent around awkward text. |
-| `prompt.txt` | Replaces the default system prompt, e.g. to change tone ("make it more concise and direct"). Keep the `<draft></draft>` instructions so drafts that read like requests are edited, not answered. |
+| `style` | `full` (default): rewrite for clarity and brevity, keeping meaning, facts, names and voice. `light`: minimal edits, only typos, grammar, punctuation and capitalisation. |
+| `prompt.txt` | Replaces the system prompt for either style, e.g. to change tone. Keep the `<draft></draft>` instructions so drafts that read like requests are edited, not answered. With a custom prompt there is no automatic retry with the light style. |
 | `no-hud` | Empty file: use notifications instead of the floating pill. |
 | `no-sound` | Empty file: no start/finish sounds. |
 | `debug` | Empty file: log timings and decisions (never your text) to `~/Library/Logs/refine-anywhere.log`. Delete it to stop logging. |
 | `no-paste` | Empty file, for diagnostics: do everything except paste, leaving the result on the clipboard. |
 
 To change the hotkey, edit the rule in `karabiner/refine-anywhere.json` (or in Karabiner's own UI).
+
+For scripting and tests the scripts also read `REFINE_MODEL`, `REFINE_STYLE` and `REFINE_CLAUDE` (a stand-in for the `claude` binary) from the environment; Karabiner and Services don't pass those through, hence the files above.
 
 ## Privacy
 
@@ -124,7 +127,8 @@ Your text is sent to Anthropic through the `claude` CLI, using your own login. T
 - **20–45 s instead of ~4 s**: Karabiner-started processes can run at background priority, `claude` is slow in a large working directory, and extended thinking adds seconds. The scripts clear the background priority, run from an empty directory and set `MAX_THINKING_TOKENS=0`.
 - **Services item runs but the text isn't replaced**: the workflow must not be bound to an app (no `serviceApplicationBundleID` in `document.wflow`), or macOS treats it as Finder-only.
 - **The model answers your message instead of editing it**: drafts are wrapped in `<draft>` tags and the prompt says to edit, never answer. A custom `prompt.txt` should keep that.
-- **Typos fixed but the sentence got reworded**: the default prompt asks for minimal edits; larger models follow it more consistently (hence `sonnet`).
+- **It rewrote more than I wanted**: set `style` to `light` for typo-and-grammar fixes only.
+- **A formatted message took ~8 s or nothing was pasted**: awkward messages (a mention or smart link in the middle of a sentence) often can't take the full rewrite without breaking the formatting. It retries with the light style, and if that can't be applied safely either, the refined text is left on the clipboard instead.
 
 ## Limitations
 

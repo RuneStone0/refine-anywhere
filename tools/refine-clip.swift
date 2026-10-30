@@ -6,7 +6,8 @@
 //   read-texty                  print the ops JSON. Exit 1: no slack/texty. Exit 2: nothing worth refining (no formatting)
 //   text ORIG.json              print the ops' text joined together (what the model sees)
 //   apply-diff ORIG.json TXT    refined plain text -> new ops JSON. The refined text is diffed word by word against the
-//                               original and each change is applied only inside the single editable run it belongs to
+//                               original and each change is applied only inside the single editable run it belongs to.
+//                               Exit 3 if the result would not reproduce the refined text exactly (a hunk was skipped)
 //   verify ORIG.json NEW.json   exit 0 only if NEW has the same runs, attributes, protected runs and line breaks
 //   same A.json B.json          exit 0 if both hold identical ops
 //   plain NEW.json              print the ops' text joined together (plain-text fallback)
@@ -165,12 +166,16 @@ func diffHunks(_ a: [Tok], _ b: [Tok]) -> [Hunk]? {
 }
 
 // One logical edit often shows up as several hunks separated by a single matching space ("ou side" -> "outside.").
-// Applying only some of them would garble the text, so hunks separated by one whitespace token become one.
-func mergeNearby(_ hunks: [Hunk], _ a: [Tok]) -> [Hunk] {
+// Applying only some of them would garble the text, so hunks separated by one whitespace token become one, but only
+// when the merged edit still lies inside a single run (never across a mention, a line break run, or two runs).
+func mergeNearby(_ hunks: [Hunk], _ a: [Tok], totalLength: Int, withinOneRun: (Int, Int) -> Bool) -> [Hunk] {
+    func startPos(_ i: Int) -> Int { i < a.count ? a[i].range.location : totalLength }
+    func endPos(_ h: Hunk) -> Int { h.a1 > h.a0 ? a[h.a1 - 1].range.location + a[h.a1 - 1].range.length : startPos(h.a0) }
     var out: [Hunk] = []
     for h in hunks {
         if var last = out.last, h.a0 - last.a1 <= 1,
-           (h.a0 - last.a1 == 0 || a[last.a1].s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+           (h.a0 - last.a1 == 0 || a[last.a1].s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
+           withinOneRun(startPos(last.a0), max(endPos(h), startPos(last.a0))) {
             last.a1 = h.a1; last.b1 = h.b1
             out[out.count - 1] = last
         } else { out.append(h) }
@@ -185,7 +190,9 @@ func applyDiff(orig: [Op], refined: String) -> [Op]? {
     let original = texts.joined()
     let ta = tokenize(original), tb = tokenize(refined)
     guard let raw = diffHunks(ta, tb) else { return nil }
-    let hunks = mergeNearby(raw, ta)
+    let hunks = mergeNearby(raw, ta, totalLength: pos) { a, b in
+        (0..<orig.count).contains { starts[$0] <= a && b <= ends[$0] }
+    }
     let refinedNS = refined as NSString
 
     var edits = [[(Int, Int, String)]](repeating: [], count: orig.count)   // per run: (local start, local end, new text)
@@ -225,6 +232,14 @@ func applyDiff(orig: [Op], refined: String) -> [Op]? {
         }
         result[r]["insert"] = s as String
     }
+
+    // The projection must reproduce the model's text exactly. A skipped hunk (it crossed a mention, a smart link,
+    // a line-format run or two runs) means the model's rewrite cannot be applied faithfully, and a half-applied
+    // rewrite could garble the message. Embed placeholders and outer whitespace do not count.
+    func normalized(_ t: String) -> String {
+        t.replacingOccurrences(of: "\u{FFFC}", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    guard normalized(result.map(runText).joined()) == normalized(refined) else { return nil }
     return result
 }
 
@@ -248,7 +263,7 @@ case "text":
 case "apply-diff":
     guard args.count >= 4, let orig = readOpsFile(args[2]),
           let refined = try? String(contentsOfFile: args[3], encoding: .utf8),
-          let result = applyDiff(orig: orig, refined: refined) else { fail(1) }
+          let result = applyDiff(orig: orig, refined: refined) else { fail(3, "rewrite cannot be applied to the formatted runs exactly") }
     FileHandle.standardOutput.write(opsJSON(result).data(using: .utf8)!)
 
 case "verify":
