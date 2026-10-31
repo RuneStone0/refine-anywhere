@@ -25,6 +25,7 @@ While it works you get a small floating **"Refining…"** pill and a soft sound,
 
 Safety nets:
 
+- The output never contains an em dash: the prompts forbid it, and any that slip through are replaced with commas.
 - If Claude fails or times out, your original text is left untouched.
 - If you switch apps while it works, it does **not** paste into the wrong window. The result is left on the clipboard instead.
 - If you type or click while it works, it doesn't paste over what you did. Same fallback.
@@ -105,7 +106,7 @@ Karabiner and Services don't pass your shell environment, so settings are files 
 | --- | --- |
 | `model` | Model alias or id. Default: `sonnet`. `haiku` is faster but less consistent around awkward text. |
 | `style` | `full` (default): rewrite for clarity and brevity, keeping meaning, facts, names and voice. `light`: minimal edits, only typos, grammar, punctuation and capitalisation. |
-| `prompt.txt` | Replaces the system prompt for either style, e.g. to change tone. Keep the `<draft></draft>` instructions so drafts that read like requests are edited, not answered. With a custom prompt there is no automatic retry with the light style. |
+| `prompt.txt` | Replaces the system prompt for either style, e.g. to change tone. Keep the `<draft></draft>` instructions so drafts that read like requests are edited, not answered. With a custom prompt there is no automatic retry with the light style. The "never an em dash" rule is also enforced in code, so it holds for a custom prompt too. |
 | `no-hud` | Empty file: use notifications instead of the floating pill. |
 | `no-sound` | Empty file: no start/finish sounds. |
 | `debug` | Empty file: log timings and decisions (never your text) to `~/Library/Logs/refine-anywhere.log`. Delete it to stop logging. |
