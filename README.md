@@ -29,7 +29,7 @@ Safety nets:
 - If Claude fails or times out, your original text is left untouched.
 - If you switch apps while it works, it does **not** paste into the wrong window. The result is left on the clipboard instead.
 - If you type or click while it works, it doesn't paste over what you did. Same fallback.
-- Slack mentions and smart links are never reworded. If a rewrite can't be applied to the formatted message exactly, it is retried once with the lighter style; if that fails too, **nothing is pasted** and the refined text is left on your clipboard (pasting it would flatten the formatting and turn mentions into plain text).
+- Slack mentions and smart links are never reworded. If a rewrite can't be applied to the formatted message faithfully (a mention or link went missing, say), it is retried once with the lighter style; if that fails too, **nothing is pasted** and the refined text is left on your clipboard (pasting it would flatten the formatting and turn mentions into plain text).
 
 ## How it works
 
@@ -54,14 +54,12 @@ flowchart LR
 
 ### Slack rich text
 
-When you copy formatted text in Slack, the clipboard holds a Chromium "web custom data" blob with a `slack/texty` entry: a list of text runs, each with attributes (`{"insert":"bold","attributes":{"bold":true}}`). `refine-clip` reads it and:
+When you copy formatted text in Slack, the clipboard holds a Chromium "web custom data" blob with a `slack/texty` entry: a list of text runs, each with attributes (`{"insert":"bold","attributes":{"bold":true}}`). `refine-clip` reads it and applies the refinement in one of two ways:
 
-1. gives the model only the plain text of the runs, which keeps it as fast and reliable as plain text;
-2. diffs the model's answer against the original word by word, and applies each change only **inside the single editable run it belongs to**;
-3. never touches runs with `slack*` attributes (mentions, smart links, emoji), URLs, or line-format runs such as bullets;
-4. requires the projection to reproduce the model's text exactly (an edit that crosses a mention, a bullet or two runs can't be applied faithfully, so the rewrite is rejected rather than half-applied), verifies the result has the same runs and attributes, then rewrites the clipboard (clear, then every format back, since macOS silently ignores in-place edits to another app's clipboard) and pastes.
+- **Rebuild (default `full` style, free rewrites).** The model sees the text with list items written as `1. ` / `- ` lines and rewrites it freely: merging sentences, rewording and reordering list items. `refine-clip rebuild` then reconstructs the message: mentions and smart links are protected tokens that must come back exactly once and in order, lists are rebuilt from the line prefixes, and bold, italic and links are re-applied wherever their words survive. A rewrite that drops a mention or a link is rejected.
+- **Diff (`light` style, small edits).** The model sees plain text; its answer is diffed word by word against the original and each change is applied only **inside the single editable run it belongs to**. A rewrite that cannot be reproduced exactly is rejected.
 
-If anything doesn't check out it retries with the light style and otherwise stops without pasting, rather than risk mangling the message. Other apps' HTML (e.g. browsers) takes a similar path with a tag-structure check; that path has had far less real-world testing than Slack's.
+Either way the result is verified (protected runs, links and URLs unchanged), then the clipboard is rewritten (clear, then every format back, since macOS silently ignores in-place edits to another app's clipboard) and pasted. If anything doesn't check out it retries with the light style and otherwise stops without pasting, rather than risk mangling the message. Other apps' HTML (e.g. browsers) takes a similar path with a tag-structure check; that path has had far less real-world testing than Slack's.
 
 ## Requirements
 
@@ -105,7 +103,7 @@ Karabiner and Services don't pass your shell environment, so settings are files 
 | File | Effect |
 | --- | --- |
 | `model` | Model alias or id. Default: `sonnet`. `haiku` is faster but less consistent around awkward text. |
-| `style` | `full` (default): rewrite for clarity and brevity, keeping meaning, facts, names and voice. `light`: minimal edits, only typos, grammar, punctuation and capitalisation. |
+| `style` | `full` (default): rewrite for clarity and brevity, keeping meaning, facts, names and stance; the model rewrites freely (leads with the point, tightens list items, uses a conversational tone). `light`: minimal edits, only typos, grammar, punctuation and capitalisation. |
 | `prompt.txt` | Replaces the system prompt for either style, e.g. to change tone. Keep the `<draft></draft>` instructions so drafts that read like requests are edited, not answered. With a custom prompt there is no automatic retry with the light style. The "never an em dash" rule is also enforced in code, so it holds for a custom prompt too. |
 | `no-hud` | Empty file: use notifications instead of the floating pill. |
 | `no-sound` | Empty file: no start/finish sounds. |
@@ -129,7 +127,7 @@ Your text is sent to Anthropic through the `claude` CLI, using your own login. T
 - **Services item runs but the text isn't replaced**: the workflow must not be bound to an app (no `serviceApplicationBundleID` in `document.wflow`), or macOS treats it as Finder-only.
 - **The model answers your message instead of editing it**: drafts are wrapped in `<draft>` tags and the prompt says to edit, never answer. A custom `prompt.txt` should keep that.
 - **It rewrote more than I wanted**: set `style` to `light` for typo-and-grammar fixes only.
-- **A formatted message took ~8 s or nothing was pasted**: awkward messages (a mention or smart link in the middle of a sentence) often can't take the full rewrite without breaking the formatting. It retries with the light style, and if that can't be applied safely either, the refined text is left on the clipboard instead.
+- **A formatted message took ~8 s or nothing was pasted**: the full rewrite dropped or moved a mention or link, so it was rejected. It retries with the light style, and if that can't be applied safely either, the refined text is left on the clipboard instead.
 
 ## Limitations
 
@@ -137,6 +135,7 @@ Your text is sent to Anthropic through the `claude` CLI, using your own login. T
 - The Services menu item always works on plain text.
 - The hotkey temporarily uses your clipboard (restored afterwards, plain text only).
 - Requires apps that respond to Cmd+C / Cmd+V / Cmd+A in their text fields.
+- In a full rewrite, bold/italic/strike survive only where the formatted words are kept verbatim; links are never lost. Messages with quotes, code blocks, headings, checklists or images use the light style instead.
 - Slack can change its clipboard format at any time; if rich-text mode ever stops working it falls back to plain text.
 
 ## License

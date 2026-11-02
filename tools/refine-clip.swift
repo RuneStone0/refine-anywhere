@@ -8,6 +8,9 @@
 //   apply-diff ORIG.json TXT    refined plain text -> new ops JSON. The refined text is diffed word by word against the
 //                               original and each change is applied only inside the single editable run it belongs to.
 //                               Exit 3 if the result would not reproduce the refined text exactly (a hunk was skipped)
+//   render ORIG.json            text for a full rewrite: list lines get "1. " / "- " prefixes (exit 3: unsupported content)
+//   rebuild ORIG.json TXT       rewritten text -> new ops JSON; mentions/links must survive once, in order; exit 3 otherwise
+//   verify-rebuild ORIG NEW     exit 0 if every protected run, link and URL survived in a rebuilt message
 //   verify ORIG.json NEW.json   exit 0 only if NEW has the same runs, attributes, protected runs and line breaks
 //   same A.json B.json          exit 0 if both hold identical ops
 //   plain NEW.json              print the ops' text joined together (plain-text fallback)
@@ -243,6 +246,141 @@ func applyDiff(orig: [Op], refined: String) -> [Op]? {
     return result
 }
 
+
+// MARK: rebuild: full rewrites of a formatted message
+//
+// apply-diff only handles small edits inside single runs. For a real rewrite (sentences merged, list items reworded or
+// reordered) the message is rebuilt from the refined text instead: mentions and smart links are protected tokens that
+// must come back exactly once and in order, list structure travels as "1. " / "- " line prefixes, and bold/italic/links
+// are re-applied wherever their words survive. Anything that cannot be rebuilt faithfully returns nil (exit 3).
+
+struct Line { var runs: [Op]; var attrs: [String: Any]? }
+
+func splitLines(_ ops: [Op]) -> [Line]? {
+    var lines: [Line] = [], cur: [Op] = []
+    for op in ops {
+        guard let s = op["insert"] as? String else { return nil }   // image/emoji embeds: not supported
+        let attrs = op["attributes"] as? [String: Any]
+        if !s.isEmpty && s.allSatisfy({ $0 == "\n" }) {
+            for _ in s { lines.append(Line(runs: cur, attrs: attrs)); cur = [] }
+        } else if s.contains("\n") {
+            if isProtected(op) { return nil }
+            let parts = s.components(separatedBy: "\n")
+            for (i, p) in parts.enumerated() {
+                if !p.isEmpty { var o = op; o["insert"] = p; cur.append(o) }
+                if i < parts.count - 1 { lines.append(Line(runs: cur, attrs: nil)); cur = [] }
+            }
+        } else { cur.append(op) }
+    }
+    if !cur.isEmpty { lines.append(Line(runs: cur, attrs: nil)) }
+    for l in lines {
+        guard let a = l.attrs else { continue }
+        guard Set(a.keys).isSubset(of: ["list", "indent"]) else { return nil }
+        if let kind = a["list"] as? String, !["ordered", "bullet"].contains(kind) { return nil }
+    }
+    return lines
+}
+
+func renderLines(_ lines: [Line]) -> String {
+    var out: [String] = [], counters: [Int: Int] = [:]
+    for l in lines {
+        let text = l.runs.map(runText).joined()
+        guard let kind = l.attrs?["list"] as? String else { counters = [:]; out.append(text); continue }
+        let indent = (l.attrs?["indent"] as? Int) ?? 0
+        let pad = String(repeating: "  ", count: indent)
+        counters = counters.filter { $0.key <= indent }
+        if kind == "ordered" { counters[indent, default: 0] += 1; out.append("\(pad)\(counters[indent]!). \(text)") }
+        else { out.append("\(pad)- \(text)") }
+    }
+    return out.joined(separator: "\n")
+}
+
+func parseMarkedLine(_ s: String) -> (String, [String: Any]?) {
+    for (pattern, kind) in [("^( *)\\d+[.)] (.*)$", "ordered"), ("^( *)[-*\u{2022}] (.*)$", "bullet")] {
+        let re = try! NSRegularExpression(pattern: pattern)
+        let ns = s as NSString
+        if let m = re.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)) {
+            let indent = min(ns.substring(with: m.range(at: 1)).count / 2, 8)
+            var attrs: [String: Any] = ["list": kind]
+            if indent > 0 { attrs["indent"] = indent }
+            return (ns.substring(with: m.range(at: 2)), attrs)
+        }
+    }
+    return (s, nil)
+}
+
+func linkValues(_ ops: [Op]) -> Set<String> {
+    Set(ops.compactMap { ($0["attributes"] as? [String: Any])?["link"] as? String })
+}
+
+func rebuild(orig: [Op], refined: String) -> [Op]? {
+    guard let lines = splitLines(orig) else { return nil }
+    let protectedOps = orig.filter(isProtected)
+    let protectedTexts = protectedOps.compactMap { $0["insert"] as? String }
+    guard protectedTexts.count == protectedOps.count, !protectedTexts.contains(where: { $0.isEmpty }) else { return nil }
+    let hasLists = lines.contains { $0.attrs?["list"] != nil }
+
+    // Formatted words (bold, italic, strike, code, links with their own text) to put back where they survive.
+    var fmt: [(String, [String: Any])] = []
+    for op in orig where !isProtected(op) {
+        guard let s = op["insert"] as? String, let a = op["attributes"] as? [String: Any], !a.isEmpty else { continue }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { fmt.append((t, a)) }
+    }
+
+    var out: [Op] = [], pi = 0, fi = 0
+    func emit(_ text: String, _ attrs: [String: Any]?) {
+        guard !text.isEmpty else { return }
+        var op: Op = ["insert": text]
+        if let a = attrs, !a.isEmpty { op["attributes"] = a }
+        out.append(op)
+    }
+    func emitFormatted(_ seg: String) {
+        var s = seg
+        while fi < fmt.count, let r = s.range(of: fmt[fi].0) {
+            emit(String(s[..<r.lowerBound]), nil)
+            emit(fmt[fi].0, fmt[fi].1)
+            fi += 1
+            s = String(s[r.upperBound...])
+        }
+        emit(s, nil)
+    }
+
+    let parsed = refined.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
+        .map { hasLists ? parseMarkedLine($0) : ($0, nil) }
+    for (idx, (content, attrs)) in parsed.enumerated() {
+        // A blank line right before a list is noise (models like to add one); Slack lists follow the line above directly.
+        if content.isEmpty, attrs == nil, idx + 1 < parsed.count, parsed[idx + 1].1 != nil { continue }
+        var rest = content
+        while pi < protectedTexts.count, let r = rest.range(of: protectedTexts[pi]) {
+            emitFormatted(String(rest[..<r.lowerBound]))
+            out.append(protectedOps[pi]); pi += 1
+            rest = String(rest[r.upperBound...])
+        }
+        emitFormatted(rest)
+        emit("\n", attrs)
+    }
+    guard pi == protectedTexts.count else { return nil }                   // a mention or smart link was dropped or moved
+    if let last = orig.last?["insert"] as? String, !last.hasSuffix("\n"), out.last?["insert"] as? String == "\n" { out.removeLast() }
+
+    // Merge neighbouring plain pieces (never newline runs or protected runs).
+    var merged: [Op] = []
+    for op in out {
+        func plain(_ o: Op) -> Bool { o["attributes"] == nil && (o["insert"] as? String) != "\n" && !isProtected(o) }
+        if let last = merged.last, plain(last), plain(op) { merged[merged.count - 1]["insert"] = (last["insert"] as! String) + (op["insert"] as! String) }
+        else { merged.append(op) }
+    }
+    guard linkValues(orig).isSubset(of: linkValues(merged)) else { return nil }   // never lose a link
+    return merged
+}
+
+func verifyRebuild(orig: [Op], new: [Op]) -> Bool {
+    let a = orig.filter(isProtected), b = new.filter(isProtected)
+    guard a.count == b.count, zip(a, b).allSatisfy({ NSDictionary(dictionary: $0).isEqual(to: $1) }) else { return false }
+    guard linkValues(orig).isSubset(of: linkValues(new)), urls(in: orig).isSubset(of: urls(in: new)) else { return false }
+    return new.contains { isEditable($0) } && new.allSatisfy { $0["insert"] is String }
+}
+
 // MARK: commands
 
 let args = CommandLine.arguments
@@ -259,6 +397,18 @@ case "read-texty":
 case "text":
     guard args.count >= 3, let ops = readOpsFile(args[2]) else { fail(1) }
     print(ops.map(runText).joined(), terminator: "")
+
+case "render":   // the model's input for a full rewrite: text with list lines as "1. " / "- " prefixes. Exit 3: unsupported content
+    guard args.count >= 3, let ops = readOpsFile(args[2]), let lines = splitLines(ops) else { fail(3, "cannot render") }
+    print(renderLines(lines), terminator: "")
+
+case "rebuild":   // ORIG.json TXT: rebuild the message from a fully rewritten text. Exit 3 if it cannot be done faithfully
+    guard args.count >= 4, let orig = readOpsFile(args[2]), let refined = try? String(contentsOfFile: args[3], encoding: .utf8),
+          let result = rebuild(orig: orig, refined: refined), verifyRebuild(orig: orig, new: result) else { fail(3, "rewrite cannot be rebuilt faithfully") }
+    FileHandle.standardOutput.write(opsJSON(result).data(using: .utf8)!)
+
+case "verify-rebuild":
+    guard args.count >= 4, let a = readOpsFile(args[2]), let b = readOpsFile(args[3]), verifyRebuild(orig: a, new: b) else { fail(1) }
 
 case "apply-diff":
     guard args.count >= 4, let orig = readOpsFile(args[2]),
@@ -291,7 +441,7 @@ case "plain":
     print(ops.compactMap { $0["insert"] as? String }.joined(), terminator: "")
 
 case "write-texty":
-    guard args.count >= 4, let new = readOpsFile(args[2]), let orig = readOpsFile(args[3]), new.count == orig.count,
+    guard args.count >= 4, let new = readOpsFile(args[2]), let orig = readOpsFile(args[3]),
           let (entries, _) = clipboardTexty(),
           let plain = entries.first(where: { $0.0 == plainKey })?.1 ?? pb.string(forType: .string) else { fail(1, "cannot read clipboard") }
 
@@ -299,12 +449,16 @@ case "write-texty":
     // Runs whose plain-text form differs (smart links print their URL, embeds print nothing) are simply skipped.
     var result = plain as NSString
     var cursor = 0
-    for (o, n) in zip(orig, new) {
-        guard let a = o["insert"] as? String, let b = n["insert"] as? String, !a.isEmpty else { continue }
-        let r = result.range(of: a, options: [], range: NSRange(location: cursor, length: result.length - cursor))
-        guard r.location != NSNotFound else { continue }
-        if a != b { result = result.replacingCharacters(in: r, with: b) as NSString }
-        cursor = r.location + (b as NSString).length
+    if new.count == orig.count {
+        for (o, n) in zip(orig, new) {
+            guard let a = o["insert"] as? String, let b = n["insert"] as? String, !a.isEmpty else { continue }
+            let r = result.range(of: a, options: [], range: NSRange(location: cursor, length: result.length - cursor))
+            guard r.location != NSNotFound else { continue }
+            if a != b { result = result.replacingCharacters(in: r, with: b) as NSString }
+            cursor = r.location + (b as NSString).length
+        }
+    } else {   // rebuilt message: render the plain text from the new runs
+        result = (splitLines(new).map(renderLines) ?? new.compactMap { $0["insert"] as? String }.joined()) as NSString
     }
     let newPlain = result as String
     let newJSON = opsJSON(new)
