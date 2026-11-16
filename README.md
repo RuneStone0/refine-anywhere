@@ -27,6 +27,7 @@ Safety nets:
 
 - The output never contains an em dash: the prompts forbid it, and any that slip through are replaced with commas.
 - If Claude fails or times out, your original text is left untouched.
+- If Claude is **signed out** (the login expires every so often), it heals itself: a pill says so, `claude auth login` opens in your browser, you approve it, and a message tells you to press the hotkey again (the Services menu item retries on its own). If the sign-in doesn't finish, a dialog explains the fix and can copy the command for you.
 - If you switch apps while it works, it does **not** paste into the wrong window. The result is left on the clipboard instead.
 - If you type or click while it works, it doesn't paste over what you did. Same fallback.
 - Slack mentions and smart links are never reworded. If a rewrite can't be applied to the formatted message faithfully (a mention or link went missing, say), it is retried once with the lighter style; if that fails too, **nothing is pasted** and the refined text is left on your clipboard (pasting it would flatten the formatting and turn mentions into plain text).
@@ -105,6 +106,7 @@ Karabiner and Services don't pass your shell environment, so settings are files 
 | `model` | Model alias or id. Default: `sonnet`. `haiku` is faster but less consistent around awkward text. |
 | `style` | `full` (default): rewrite for clarity and brevity, keeping meaning, facts, names and stance; the model rewrites freely (leads with the point, tightens list items, uses a conversational tone). `light`: minimal edits, only typos, grammar, punctuation and capitalisation. |
 | `prompt.txt` | Replaces the system prompt for either style, e.g. to change tone. Keep the `<draft></draft>` instructions so drafts that read like requests are edited, not answered. With a custom prompt there is no automatic retry with the light style. The "never an em dash" rule is also enforced in code, so it holds for a custom prompt too. |
+| `oauth-token` | Optional: the token printed by `claude setup-token` (long-lived, independent of the keychain session that expires). Exported as `CLAUDE_CODE_OAUTH_TOKEN` for the `claude` calls. Not covered by tests. |
 | `no-hud` | Empty file: use notifications instead of the floating pill. |
 | `no-sound` | Empty file: no start/finish sounds. |
 | `debug` | Empty file: log timings and decisions (never your text) to `~/Library/Logs/refine-anywhere.log`. Delete it to stop logging. |
@@ -122,6 +124,7 @@ Your text is sent to Anthropic through the `claude` CLI, using your own login. T
 
 - **Nothing happens and the debug log says `trusted=false`**: grant Accessibility to `Karabiner-Console-User-Server.app` (not just Karabiner-Elements) and restart it with the `launchctl kickstart` command above.
 - **Text is copied and refined but never pasted**: key events posted by a process that exits immediately can be dropped by macOS. `refine-clip key` therefore stays alive briefly after posting. If you wrap it, keep that.
+- **Everything fails with a sign-in message**: Claude is signed out. The tool tries `claude auth login` itself; if that is not possible, run it in a terminal. Check with `claude auth status`.
 - **"Not logged in" only when run from Karabiner/Services**: `claude` needs `USER`, `LOGNAME` and `TMPDIR` to reach your keychain login. The scripts set them if missing.
 - **20–45 s instead of ~4 s**: Karabiner-started processes can run at background priority, `claude` is slow in a large working directory, and extended thinking adds seconds. The scripts clear the background priority, run from an empty directory and set `MAX_THINKING_TOKENS=0`.
 - **Services item runs but the text isn't replaced**: the workflow must not be bound to an app (no `serviceApplicationBundleID` in `document.wflow`), or macOS treats it as Finder-only.

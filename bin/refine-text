@@ -12,6 +12,9 @@
 #   refine-text --strict failure => exit 1 with no output (instead of echoing the input back)
 #   refine-text --hud    also show the floating progress pill (used by the Services menu item)
 #
+# Exit codes: 0 ok, 1 claude failed, 3 cannot apply safely, 4 claude is signed out (--strict/--ops/--html callers sign
+# in via sign_in; the Services path (--hud) heals itself: it signs in, then retries once).
+#
 # Optional config (env vars are not visible to Karabiner/Services, so use files in ~/.config/refine-anywhere/):
 #   model        model alias or id (default: sonnet; "haiku" is faster but less consistent)
 #   style        "full" (default): rewrite for clarity and brevity;  "light": fix typos/grammar/punctuation only
@@ -89,7 +92,8 @@ $PROMPT_MARKERS"
   out=$(cat "$tmp")
   dbg "mode=$MODE model=$MODEL style=$([ "$prompt" = "$PROMPT_LIGHT" ] && echo light || echo full) how=$how secs=$((SECONDS-t0)) status=$status in_len=${#input} out_len=${#out} err=$(head -c 300 "$tmp.err" | tr '\n' ' ')"
 
-  if [ $status -ne 0 ] || [ -z "$out" ] || [[ "$out" == "Not logged in"* ]]; then return 1; fi
+  if [[ "$out" == "Not logged in"* ]] || grep -q "Not logged in" "$tmp.err" 2>/dev/null; then SIGNED_OUT=1; return 1; fi
+  if [ $status -ne 0 ] || [ -z "$out" ]; then return 1; fi
 
   # Strip a stray <draft> wrapper the model may have echoed back.
   out=$(printf '%s' "$out" | perl -0777 -pe 's/\A\s*<draft>\s*\n?//; s/\n?\s*<\/draft>\s*\z//')
@@ -127,6 +131,12 @@ first=diff
 # The full style (not a custom prompt) rewrites freely, so it rebuilds the message instead of patching runs.
 [ "$MODE" = ops ] && [ "$PROMPT" = "$PROMPT_FULL" ] && [ -n "$model_marked" ] && first=rebuild
 if [ "$MODE" = ops ] && [ "$first" = diff ] && [ "$PROMPT" = "$PROMPT_FULL" ]; then rc=3; else attempt "$PROMPT" "$first"; rc=$?; fi
+if [ $rc -eq 1 ] && [ "${SIGNED_OUT:-0}" = 1 ]; then
+  if [ $USE_HUD = 1 ] && [ $STRICT = 0 ]; then       # Services: heal here (callers with a pill of their own do it themselves)
+    hud_stop
+    if sign_in; then SIGNED_OUT=0; hud_start "Refining…"; attempt "$PROMPT" "$first"; rc=$?; else sound Basso; explain_login; fi
+  else exit 4; fi
+fi
 if [ $rc -eq 3 ] && [ -n "$RETRY_PROMPT" ]; then
   dbg "retrying with the light style"
   attempt "$RETRY_PROMPT"; rc=$?

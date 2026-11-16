@@ -62,6 +62,15 @@ fail_refine() {
   sound Basso; exit 0
 }
 
+# claude is signed out: heal by signing in through the browser. The selection is gone by the time the user is back,
+# so don't refine or paste; ask for a re-run instead.
+auth_failed() {
+  hud_stop; printf '%s' "$orig" | pbcopy
+  if sign_in; then tell_user "Signed in. Press Cmd+Shift+2 again" 5; sound Pop
+  else sound Basso; explain_login; fi
+  exit 0
+}
+
 refined_rich=""; flattened=0
 if [ $kind != plain ]; then
   if [ $kind = ops ]; then
@@ -69,6 +78,7 @@ if [ $kind != plain ]; then
   else
     refined_rich=$(printf '%s' "$html" | refine-text --html); rc=$?
   fi
+  if [ $rc -eq 4 ]; then auth_failed; fi
   if [ $rc -eq 1 ]; then fail_refine; fi                       # claude itself failed: don't retry
   if [ $rc -ne 0 ] || [ -z "$refined_rich" ]; then
     dbg "rich refine rejected (rc=$rc), falling back to plain"
@@ -90,7 +100,11 @@ elif [ $kind = html ]; then
   refined_plain=$(printf '%s' "$refined_rich" | html_to_plain)
   changed=$([ "$refined_rich" != "$html" ] && echo yes || echo no)
 else
-  [ -n "$refined" ] || refined=$(printf '%s' "$text" | refine-text --strict) || fail_refine
+  if [ -z "$refined" ]; then
+    refined=$(printf '%s' "$text" | refine-text --strict); rc=$?
+    [ $rc -eq 4 ] && auth_failed
+    [ $rc -eq 0 ] || fail_refine
+  fi
   changed=$([ "$refined" != "$text" ] && echo yes || echo no)
 fi
 
